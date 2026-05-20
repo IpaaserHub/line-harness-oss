@@ -1,6 +1,7 @@
 import type { Context, Next } from 'hono';
 import { getStaffByApiKey } from '@line-crm/db';
 import type { Env } from '../index.js';
+import { timingSafeEqual } from '../utils/timing-safe.js';
 
 export async function authMiddleware(c: Context<Env>, next: Next): Promise<Response | void> {
   // Skip auth for the LINE webhook endpoint — it uses signature verification instead
@@ -68,8 +69,10 @@ export async function authMiddleware(c: Context<Env>, next: Next): Promise<Respo
     return next();
   }
 
-  // Fallback: env API_KEY acts as owner (current rotation slot)
-  if (token === c.env.API_KEY) {
+  // Fallback: env API_KEY acts as owner (current rotation slot).
+  // Constant-time compare avoids leaking the key byte-by-byte via the
+  // short-circuit timing of JS `===`.
+  if (c.env.API_KEY && timingSafeEqual(token, c.env.API_KEY)) {
     c.set('staff', { id: 'env-owner', name: 'Owner', role: 'owner' as const });
     return next();
   }
@@ -84,7 +87,7 @@ export async function authMiddleware(c: Context<Env>, next: Next): Promise<Respo
   if (
     c.env.LEGACY_API_KEY &&
     c.env.LEGACY_API_KEY !== c.env.API_KEY &&
-    token === c.env.LEGACY_API_KEY
+    timingSafeEqual(token, c.env.LEGACY_API_KEY)
   ) {
     c.set('staff', { id: 'env-owner', name: 'Owner', role: 'owner' as const });
     console.log('[auth] accept_via=LEGACY_API_KEY');
