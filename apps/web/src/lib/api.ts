@@ -33,6 +33,7 @@ import type {
   TrafficPool,
   PoolAccount,
 } from '@line-crm/shared'
+import { getApiUrl } from './api-url'
 
 /** Broadcast type from API (now camelCase after worker serialization) */
 export type ApiBroadcast = Omit<Broadcast, 'targetType'> & {
@@ -54,16 +55,9 @@ export type BroadcastInsight = {
   fetchedAt?: string | null
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL
-if (!API_URL) {
-  throw new Error(
-    'NEXT_PUBLIC_API_URL is not set. Build cannot proceed without a valid API URL. ' +
-    'Set it in .env.production (local) or GitHub Secrets (CI).'
-  )
-}
-
 /**
- * Read the API key from localStorage (set during login).
+ * Read the API key from localStorage (set during login, or injected by the
+ * parent frame via postMessage when embedded in TKDir / YTDir).
  * Never embed secrets in the client bundle via NEXT_PUBLIC_* env vars.
  */
 function getApiKey(): string {
@@ -74,7 +68,7 @@ function getApiKey(): string {
 }
 
 export async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, {
+  const res = await fetch(`${getApiUrl()}${path}`, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1065,7 +1059,7 @@ export const api = {
     // クッキーや Authorization が必要 — 代わりに admin が cache-busting できる
     // タイムスタンプを付けるパターンで利用)。
     externalImageUrl: (richMenuId: string, accountId: string) =>
-      `${API_URL}/api/rich-menu-groups/external/${richMenuId}/image?accountId=${encodeURIComponent(accountId)}`,
+      `${getApiUrl()}/api/rich-menu-groups/external/${richMenuId}/image?accountId=${encodeURIComponent(accountId)}`,
 
     applyToTag: (
       groupId: string,
@@ -1083,7 +1077,7 @@ export const api = {
     // 画像 upload は Content-Type を image/* で送るので fetchApi を使わず直接 fetch。
     uploadImage: async (groupId: string, pageId: string, file: File) => {
       const res = await fetch(
-        `${API_URL}/api/rich-menu-groups/${groupId}/pages/${pageId}/image`,
+        `${getApiUrl()}/api/rich-menu-groups/${groupId}/pages/${pageId}/image`,
         {
           method: 'POST',
           headers: {
@@ -1110,7 +1104,7 @@ export const api = {
     //   v1 ではドラフト編集中のプレビュー用 = 認証バイパスでも実害は低いので、
     //   後続 PR で worker 側を whitelist 化する想定。
     imageUrl: (key: string) =>
-      `${API_URL}/api/rich-menu-images/${encodeURIComponent(key)}`,
+      `${getApiUrl()}/api/rich-menu-images/${encodeURIComponent(key)}`,
   },
   messageTemplates: {
     list: () =>
