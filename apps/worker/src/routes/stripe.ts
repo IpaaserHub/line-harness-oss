@@ -6,6 +6,7 @@ import {
   jstNow,
 } from '@line-crm/db';
 import type { Env } from '../index.js';
+import { timingSafeEqual } from '../utils/timing-safe.js';
 
 const stripe = new Hono<Env>();
 
@@ -53,18 +54,50 @@ stripe.get('/api/integrations/stripe/events', async (c) => {
 
 // ========== Stripe Webhookレシーバー ==========
 
-/** Stripe署名検証 */
-async function verifyStripeSignature(secret: string, rawBody: string, sigHeader: string): Promise<boolean> {
-  // Stripe署名形式: t=timestamp,v1=signature
-  const parts = Object.fromEntries(
-    sigHeader.split(',').map((p) => {
-      const [k, ...v] = p.split('=');
-      return [k, v.join('=')];
-    }),
-  );
-  const timestamp = parts.t;
-  const expectedSig = parts.v1;
-  if (!timestamp || !expectedSig) return false;
+const STRIPE_TIMESTAMP_TOLERANCE_SECONDS = 300; // 5 min — matches Stripe's official SDK default
+
+type StripeVerifyResult =
+  | { valid: true }
+  | { valid: false; reason: 'missing_parts' | 'stale_timestamp' | 'no_matching_signature' };
+
+/**
+ * Verifies a Stripe webhook signature header.
+ *
+ * Mirrors `stripe.webhooks.constructEvent` from the official SDK (which we
+ * don't bundle, to keep the Worker small):
+ *   header format: `t=<timestamp>,v1=<sig>,v1=<sig>,...` (multiple v1 during key rotation)
+ *   signed payload: `<timestamp>.<rawBody>`
+ *   compare:        HMAC-SHA256(secret, signed payload) hex, constant-time, against every v1
+ *   freshness:      |now - t| <= tolerance
+ */
+async function verifyStripeSignature(
+  secret: string,
+  rawBody: string,
+  sigHeader: string,
+  toleranceSeconds = STRIPE_TIMESTAMP_TOLERANCE_SECONDS,
+): Promise<StripeVerifyResult> {
+  let timestamp: string | undefined;
+  const v1Signatures: string[] = [];
+  for (const part of sigHeader.split(',')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    const k = part.slice(0, idx);
+    const v = part.slice(idx + 1);
+    if (k === 't') timestamp = v;
+    else if (k === 'v1') v1Signatures.push(v);
+  }
+  if (!timestamp || v1Signatures.length === 0) {
+    return { valid: false, reason: 'missing_parts' };
+  }
+
+  const tsNum = Number(timestamp);
+  if (!Number.isFinite(tsNum)) {
+    return { valid: false, reason: 'missing_parts' };
+  }
+  const ageSeconds = Math.abs(Math.floor(Date.now() / 1000) - tsNum);
+  if (ageSeconds > toleranceSeconds) {
+    return { valid: false, reason: 'stale_timestamp' };
+  }
 
   const encoder = new TextEncoder();
   const signedPayload = `${timestamp}.${rawBody}`;
@@ -79,28 +112,41 @@ async function verifyStripeSignature(secret: string, rawBody: string, sigHeader:
   const computedSig = Array.from(new Uint8Array(sig))
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
-  return computedSig === expectedSig;
+
+  for (const candidate of v1Signatures) {
+    if (timingSafeEqual(computedSig, candidate)) {
+      return { valid: true };
+    }
+  }
+  return { valid: false, reason: 'no_matching_signature' };
 }
 
 stripe.post('/api/integrations/stripe/webhook', async (c) => {
   try {
     const stripeSecret = (c.env as unknown as Record<string, string | undefined>).STRIPE_WEBHOOK_SECRET;
-    let body: StripeWebhookBody;
 
-    if (stripeSecret) {
-      // 署名検証モード（本番環境）
-      const sigHeader = c.req.header('Stripe-Signature') ?? '';
-      const rawBody = await c.req.text();
-
-      const valid = await verifyStripeSignature(stripeSecret, rawBody, sigHeader);
-      if (!valid) {
-        return c.json({ success: false, error: 'Stripe signature verification failed' }, 401);
-      }
-      body = JSON.parse(rawBody) as StripeWebhookBody;
-    } else {
-      // シークレット未設定（開発環境向け）
-      body = await c.req.json<StripeWebhookBody>();
+    // Fail closed: refuse unsigned webhooks. Previously the handler accepted
+    // any JSON body when STRIPE_WEBHOOK_SECRET was unset (a dev convenience),
+    // which turns a forgotten env var into a path to forged
+    // `payment_intent.succeeded` events that trigger scoring, tagging and the
+    // cv_fire automation bus.
+    if (!stripeSecret) {
+      console.error('Stripe webhook hit but STRIPE_WEBHOOK_SECRET is not configured');
+      return c.json(
+        { success: false, error: 'Stripe webhook is not configured on this deployment' },
+        503,
+      );
     }
+
+    const sigHeader = c.req.header('Stripe-Signature') ?? '';
+    const rawBody = await c.req.text();
+
+    const result = await verifyStripeSignature(stripeSecret, rawBody, sigHeader);
+    if (!result.valid) {
+      console.warn('Stripe signature verification failed:', result.reason);
+      return c.json({ success: false, error: 'Stripe signature verification failed' }, 401);
+    }
+    const body = JSON.parse(rawBody) as StripeWebhookBody;
 
     // 冪等性チェック
     const existing = await getStripeEventByStripeId(c.env.DB, body.id);
