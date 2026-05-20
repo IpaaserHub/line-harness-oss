@@ -20,6 +20,7 @@ import {
   jstNow,
 } from '@line-crm/db';
 import { buildIntroMessage } from '../services/intro-message.js';
+import { verifyLineIdToken } from '../utils/line-id-token.js';
 import type { Env } from '../index.js';
 
 const liffRoutes = new Hono<Env>();
@@ -1100,12 +1101,30 @@ liffRoutes.get('/api/liff/config', async (c) => {
 
 // ─── Existing LIFF endpoints ────────────────────────────────────
 
-// POST /api/liff/profile - get friend by LINE userId (public, no auth)
+// POST /api/liff/profile - get friend by LINE userId
+//
+// Requires a LINE Login ID token proving the caller IS the claimed LINE user.
+// Previously this was an unauthenticated lookup that let any caller probe
+// `lineUserId` values to discover which were friends of this tenant and learn
+// their internal UUID — a friend-enumeration oracle. The endpoint stays
+// "public" (no API key) because LIFF apps inside the LINE client have no API
+// key, but identity is now bound to a fresh ID token.
 liffRoutes.post('/api/liff/profile', async (c) => {
   try {
-    const body = await c.req.json<{ lineUserId: string }>();
+    const body = await c.req.json<{ lineUserId: string; idToken?: string }>();
     if (!body.lineUserId) {
       return c.json({ success: false, error: 'lineUserId is required' }, 400);
+    }
+    if (!body.idToken) {
+      return c.json({ success: false, error: 'idToken is required' }, 401);
+    }
+
+    const verified = await verifyLineIdToken(c, body.idToken);
+    if (!verified.ok) {
+      return c.json({ success: false, error: 'Invalid ID token' }, 401);
+    }
+    if (verified.sub !== body.lineUserId) {
+      return c.json({ success: false, error: 'Token does not match lineUserId' }, 403);
     }
 
     const friend = await getFriendByLineUserId(c.env.DB, body.lineUserId);

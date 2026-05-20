@@ -36,7 +36,12 @@ export async function verifySignature(
   }
   const computedBase64 = btoa(binary);
 
-  // Constant-time comparison is not strictly needed here because both strings
-  // are base64 of the same length, but we avoid early-exit for safety.
-  return computedBase64 === signature;
+  // Constant-time comparison: avoid leaking the secret one byte at a time
+  // via JS `===` short-circuit. Length mismatch is treated as non-secret.
+  if (computedBase64.length !== signature.length) return false;
+  let diff = 0;
+  for (let i = 0; i < computedBase64.length; i++) {
+    diff |= computedBase64.charCodeAt(i) ^ signature.charCodeAt(i);
+  }
+  return diff === 0;
 }

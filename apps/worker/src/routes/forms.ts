@@ -18,6 +18,7 @@ import type {
   FormUsedByAccount,
 } from '@line-crm/db';
 import type { Env } from '../index.js';
+import { verifyLineIdToken } from '../utils/line-id-token.js';
 
 const forms = new Hono<Env>();
 
@@ -307,6 +308,7 @@ forms.post('/api/forms/:id/submit', async (c) => {
     const body = await c.req.json<{
       lineUserId?: string;
       friendId?: string;
+      idToken?: string;
       data?: Record<string, unknown>;
       _skipWebhook?: boolean;
       trackedLinkId?: string;
@@ -334,12 +336,41 @@ forms.post('/api/forms/:id/submit', async (c) => {
       }
     }
 
-    // Resolve friend by lineUserId or friendId
-    let friendId: string | null = body.friendId ?? null;
-    if (!friendId && body.lineUserId) {
-      const friend = await getFriendByLineUserId(c.env.DB, body.lineUserId);
-      if (friend) {
-        friendId = friend.id;
+    // Identity verification.
+    //
+    // Submissions can be anonymous (neither lineUserId nor friendId), in which
+    // case no friend-scoped side effects fire and there is nothing to spoof.
+    //
+    // If the caller claims a LINE identity, they must present a LINE Login ID
+    // token whose `sub` matches the claimed friend's line_user_id. Without
+    // this, anyone who knows another user's line_user_id or friend UUID can
+    // submit forms AS that user — triggering tag assignment, scenario
+    // enrollment, metadata writes, and reward push messages to the victim.
+    let friendId: string | null = null;
+    const claimsIdentity = Boolean(body.lineUserId || body.friendId);
+
+    if (claimsIdentity) {
+      if (!body.idToken) {
+        return c.json({ success: false, error: 'idToken is required for identified submissions' }, 401);
+      }
+      const verified = await verifyLineIdToken(c, body.idToken);
+      if (!verified.ok) {
+        return c.json({ success: false, error: 'Invalid ID token' }, 401);
+      }
+
+      let claimedFriend = null as Awaited<ReturnType<typeof getFriendById>> | null;
+      if (body.friendId) {
+        claimedFriend = await getFriendById(c.env.DB, body.friendId);
+      } else if (body.lineUserId) {
+        claimedFriend = await getFriendByLineUserId(c.env.DB, body.lineUserId);
+      }
+      if (!claimedFriend) {
+        // Unknown friend — treat as anonymous rather than leaking existence
+        friendId = null;
+      } else if (claimedFriend.line_user_id !== verified.sub) {
+        return c.json({ success: false, error: 'Token does not match claimed identity' }, 403);
+      } else {
+        friendId = claimedFriend.id;
       }
     }
 

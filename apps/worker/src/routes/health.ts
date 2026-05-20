@@ -8,6 +8,7 @@ import {
   updateAccountMigration,
 } from '@line-crm/db';
 import type { Env } from '../index.js';
+import { requireRole } from '../middleware/role-guard.js';
 
 const health = new Hono<Env>();
 
@@ -65,9 +66,11 @@ health.get('/api/accounts/migrations', async (c) => {
   }
 });
 
-health.post('/api/accounts/:id/migrate', async (c) => {
+// Account migration moves friends/scenarios between LINE accounts — irreversible.
+// Owner-only.
+health.post('/api/accounts/:id/migrate', requireRole('owner'), async (c) => {
   try {
-    const fromAccountId = c.req.param('id');
+    const fromAccountId = c.req.param('id')!;
     const body = await c.req.json<{ toAccountId: string }>();
     if (!body.toAccountId) return c.json({ success: false, error: 'toAccountId is required' }, 400);
 
