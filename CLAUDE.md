@@ -1,15 +1,15 @@
-# LINE Harness — WL社フォーク（Codex 入口）
+# LINE Harness — WL社フォーク
 
 LINE 公式アカウント向けの CRM / マーケティングオートメーション。**Cloudflare Workers + Hono + D1 (SQLite)** で動く OSS（本家 `Shudesu/line-harness-oss`、MIT）の WL社フォーク。
 TKDir / YTDir のオプション機能として、**ユーザーごとに独立インスタンスを払い出して**統合する（OEM 連携）。
 
 ## 共通ルール
 
-Codex は、実装・調査・レビュー・PR 作成の前に必ず [`CORERULE.md`](./CORERULE.md) を読むこと。
+Claude Code は、実装・調査・レビュー・PR 作成の前に必ず [`CORERULE.md`](./CORERULE.md) を読むこと。
 
-`CORERULE.md` は **Codex / Claude Code 共通のコーディング規約・設計原則の single source of truth**。共通原則を変更する場合は `AGENTS.md` と `CLAUDE.md` に重複記載せず、原則として `CORERULE.md` を更新する。
+`CORERULE.md` は **Codex / Claude Code 共通のコーディング規約・設計原則の single source of truth**。共通原則を変更する場合は `CLAUDE.md` と `AGENTS.md` に重複記載せず、原則として `CORERULE.md` を更新する。
 
-Claude Code 側の入口は [`CLAUDE.md`](./CLAUDE.md) とし、同じ `CORERULE.md` を参照する。
+Codex 側の入口は [`AGENTS.md`](./AGENTS.md) とし、同じ `CORERULE.md` を参照する。
 
 ## デプロイモデル（WL社フォーク固有）
 
@@ -61,4 +61,4 @@ packages/
 - **タスク開始前に `CORERULE.md` を確認**: 実装前に必ずコーディング規約・セキュリティ・パフォーマンスのガイドラインを読む
 - **セキュリティは fail-closed**: Webhook 署名検証・ID トークン検証・権限ガードを省略しない。詳細は `CORERULE.md` §4・§7
 - **D1 は prepared statement のみ**: SQL に文字列補間しない。`CORERULE.md` §5
-- **`AGENTS.md` は最小限に保つ**: 共通規約は `CORERULE.md` に置き、ここには重複記載しない
+- **`CLAUDE.md` は最小限に保つ**: 共通規約は `CORERULE.md` に置き、ここには重複記載しない
