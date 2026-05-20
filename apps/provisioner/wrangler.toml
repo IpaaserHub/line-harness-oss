@@ -1,0 +1,22 @@
+name = "lh-provisioner"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+workers_dev = true
+
+# ─── 設定値（公開して問題ない値）──────────────────────────────
+[vars]
+# WL社 Cloudflare アカウント ID（プロビジョニング先）
+CLOUDFLARE_ACCOUNT_ID = "YOUR_ACCOUNT_ID"
+# workers.dev のサブドメイン（例: "mhm-ipaas" → lh-xxx.mhm-ipaas.workers.dev）
+WORKERS_SUBDOMAIN = "YOUR_SUBDOMAIN"
+# 事前ビルド済み L-harness worker バンドルの取得元 URL（R2 等）
+WORKER_BUNDLE_URL = "https://example.com/line-harness-worker-bundle.js"
+# L-harness D1 スキーマ (packages/db/schema.sql) の取得元 URL
+SCHEMA_SQL_URL = "https://example.com/line-harness-schema.sql"
+
+# ─── シークレット（wrangler secret put で設定）────────────────
+# CLOUDFLARE_API_TOKEN  — D1 作成 + Worker デプロイ権限を持つ API トークン
+# PROVISIONER_API_KEY   — TKDir / YTDir からの呼び出しを認証する共有鍵
+#
+#   npx wrangler secret put CLOUDFLARE_API_TOKEN
+#   npx wrangler secret put PROVISIONER_API_KEY
