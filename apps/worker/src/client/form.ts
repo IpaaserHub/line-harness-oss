@@ -776,7 +776,14 @@ async function submitForm(): Promise<void> {
       const successMsg = rawMsg.trimStart().startsWith('{') ? '特典をLINEでお送りしました！' : rawMsg;
       // Fall through to submit below, then show webhook success
       const webhookBody: Record<string, unknown> = { data: { ...data }, _skipWebhook: true };
-      if (state.profile?.userId) webhookBody.lineUserId = state.profile.userId;
+      // The server only honours lineUserId alongside a matching LINE ID token.
+      // Send them together, or neither (anonymous submission), so a missing
+      // token degrades gracefully instead of returning 401 to the user.
+      const webhookIdToken = liff.getIDToken();
+      if (webhookIdToken && state.profile?.userId) {
+        webhookBody.lineUserId = state.profile.userId;
+        webhookBody.idToken = webhookIdToken;
+      }
       if (state.refTrackedLinkId) webhookBody.trackedLinkId = state.refTrackedLinkId;
 
       const webhookSubmitRes = await apiCall(`/api/forms/${state.formDef.id}/submit`, {
@@ -799,7 +806,13 @@ async function submitForm(): Promise<void> {
     }
 
     const body: Record<string, unknown> = { data };
-    if (state.profile?.userId) body.lineUserId = state.profile.userId;
+    // Send lineUserId only with a matching LINE ID token (server requires it
+    // to verify identity); otherwise submit anonymously rather than 401.
+    const idToken = liff.getIDToken();
+    if (idToken && state.profile?.userId) {
+      body.lineUserId = state.profile.userId;
+      body.idToken = idToken;
+    }
     if (state.refTrackedLinkId) body.trackedLinkId = state.refTrackedLinkId;
     // Note: state.friendId is users.id (UUID), not friends.id — don't send as friendId
     console.log('Submitting to:', `/api/forms/${state.formDef.id}/submit`);
