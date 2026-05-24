@@ -13,7 +13,7 @@
  */
 import { Hono } from 'hono';
 import type { Context, Next } from 'hono';
-import { CloudflareClient, CloudflareError, type WorkerBinding } from './cloudflare.js';
+import { CloudflareClient, CloudflareError, type ModuleFile, type WorkerBinding } from './cloudflare.js';
 
 interface Env {
   CLOUDFLARE_ACCOUNT_ID: string;
@@ -98,10 +98,10 @@ app.post('/provision', async (c) => {
     await cf.queryD1(db.uuid, schemaSql);
 
     // 3. Deploy the L-harness Worker bound to this D1.
-    const moduleSource = await fetchText(c.env.WORKER_BUNDLE_URL, 'worker bundle');
+    const { mainModule, files } = await fetchWorkerBundle(c.env.WORKER_BUNDLE_URL);
     const apiKey = generateApiKey();
     const bindings: WorkerBinding[] = [{ type: 'd1', name: 'DB', id: db.uuid }];
-    await cf.deployWorker(name, moduleSource, bindings);
+    await cf.deployWorker(name, files, mainModule, bindings);
 
     // 4. Set the instance API key as a Worker secret.
     await cf.putWorkerSecret(name, 'API_KEY', apiKey);
@@ -158,6 +158,41 @@ async function fetchText(url: string, label: string): Promise<string> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`failed to fetch ${label} from ${url}: ${res.status}`);
   return res.text();
+}
+
+/**
+ * Fetch a Vite-built Worker bundle from a manifest URL.
+ *
+ * Manifest format (JSON):
+ *   { "main_module": "index.js", "files": ["index.js", "assets/worker-entry-XXX.js", ...] }
+ *
+ * All `files` are resolved relative to the manifest URL's directory. Returns
+ * the resolved modules ready to pass to `cf.deployWorker(scriptName, files, mainModule, bindings)`.
+ */
+async function fetchWorkerBundle(
+  manifestUrl: string,
+): Promise<{ mainModule: string; files: ModuleFile[] }> {
+  const manifestRes = await fetch(manifestUrl);
+  if (!manifestRes.ok) {
+    throw new Error(`failed to fetch manifest from ${manifestUrl}: ${manifestRes.status}`);
+  }
+  const manifest = (await manifestRes.json()) as { main_module?: string; files?: string[] };
+  if (!manifest.main_module || !Array.isArray(manifest.files) || manifest.files.length === 0) {
+    throw new Error(`invalid manifest from ${manifestUrl}: missing main_module or files`);
+  }
+  // Strip the manifest filename to get the base URL for resolving relative paths.
+  const baseUrl = manifestUrl.replace(/\/[^/]+$/, '');
+  const files = await Promise.all(
+    manifest.files.map(async (path) => {
+      const fileUrl = `${baseUrl}/${path}`;
+      const res = await fetch(fileUrl);
+      if (!res.ok) {
+        throw new Error(`failed to fetch worker bundle file ${path} from ${fileUrl}: ${res.status}`);
+      }
+      return { path, content: await res.text() };
+    }),
+  );
+  return { mainModule: manifest.main_module, files };
 }
 
 function describe(err: unknown): string {

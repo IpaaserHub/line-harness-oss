@@ -96,35 +96,43 @@ export class CloudflareClient {
   }
 
   /**
-   * Uploads / updates a Worker script (ES module) with its bindings.
+   * Uploads / updates a Worker script with its bindings. Supports multi-module
+   * bundles (Vite output with code splitting): each entry in `modules` becomes
+   * a separate form field, and `mainModule` identifies the entry module.
    *
-   * `moduleSource` is the bundled worker JS (a single ES module). `bindings`
-   * declares the D1 / R2 / vars the script needs.
+   * Cloudflare's runtime resolves relative imports between the uploaded files
+   * (e.g. `import './assets/worker-entry-XXX.js'`) so module-split bundles
+   * work directly without re-bundling into a single file.
    *
-   * NOTE: the L-harness Worker also serves static assets (the LIFF client) via
-   * an ASSETS binding. Assets require Cloudflare's separate asset-upload
-   * session flow (POST .../workers/scripts/{name}/assets-upload-session) before
-   * this call. That step is intentionally out of this MVP scaffold — see
-   * docs/plans/2026-05-21-tkdir-ytdir-line-integration-design.md §8.
+   * NOTE: the L-harness Worker can also serve static assets (the LIFF client)
+   * via an ASSETS binding. Assets require Cloudflare's separate asset-upload
+   * session flow (POST .../workers/scripts/{name}/assets-upload-session) and
+   * are intentionally out of this Phase C scaffold — see
+   * docs/plans/2026-05-21-tkdir-ytdir-line-integration-design.md §8. The
+   * spawned Worker functions without ASSETS as long as callers only hit
+   * defined API routes (the iframe at apps/web only calls /api/*).
    */
   async deployWorker(
     scriptName: string,
-    moduleSource: string,
+    modules: ModuleFile[],
+    mainModule: string,
     bindings: WorkerBinding[],
     compatibilityDate = '2024-12-01',
   ): Promise<void> {
     const metadata = {
-      main_module: 'index.js',
+      main_module: mainModule,
       compatibility_date: compatibilityDate,
       bindings,
     };
     const form = new FormData();
     form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
-    form.append(
-      'index.js',
-      new Blob([moduleSource], { type: 'application/javascript+module' }),
-      'index.js',
-    );
+    for (const mod of modules) {
+      form.append(
+        mod.path,
+        new Blob([mod.content], { type: 'application/javascript+module' }),
+        mod.path,
+      );
+    }
     await this.request('PUT', `/accounts/${this.accountId}/workers/scripts/${scriptName}`, form);
   }
 
@@ -153,3 +161,11 @@ export type WorkerBinding =
   | { type: 'd1'; name: string; id: string }
   | { type: 'r2_bucket'; name: string; bucket_name: string }
   | { type: 'plain_text'; name: string; text: string };
+
+/** A single ES module file in a multi-module Worker upload. */
+export type ModuleFile = {
+  /** Module path as referenced by imports in the entry module. */
+  path: string;
+  /** UTF-8 source of the module. */
+  content: string;
+};

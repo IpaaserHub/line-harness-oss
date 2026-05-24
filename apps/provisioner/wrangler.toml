@@ -3,16 +3,23 @@ main = "src/index.ts"
 compatibility_date = "2024-12-01"
 workers_dev = true
 
+# WL社 ipaaser-hub アカウントへのデプロイ先ピン留め（複数アカウントを
+# wrangler login していても、このトークンが間違わないように明示する）
+account_id = "b1b0089f27951dbf63d210093808a0b3"
+
 # ─── 設定値（公開して問題ない値）──────────────────────────────
 [vars]
-# WL社 Cloudflare アカウント ID（プロビジョニング先）
-CLOUDFLARE_ACCOUNT_ID = "YOUR_ACCOUNT_ID"
-# workers.dev のサブドメイン（例: "mhm-ipaas" → lh-xxx.mhm-ipaas.workers.dev）
-WORKERS_SUBDOMAIN = "YOUR_SUBDOMAIN"
-# 事前ビルド済み L-harness worker バンドルの取得元 URL（R2 等）
-WORKER_BUNDLE_URL = "https://example.com/line-harness-worker-bundle.js"
-# L-harness D1 スキーマ (packages/db/schema.sql) の取得元 URL
-SCHEMA_SQL_URL = "https://example.com/line-harness-schema.sql"
+# WL社 Cloudflare アカウント ID（プロビジョニング先 = 自分自身）
+CLOUDFLARE_ACCOUNT_ID = "b1b0089f27951dbf63d210093808a0b3"
+# workers.dev のサブドメイン（lh-xxx.ipaaser-hub.workers.dev）
+WORKERS_SUBDOMAIN = "ipaaser-hub"
+# L-harness worker bundle の manifest URL (Cloudflare Pages にホスト)
+# manifest.json は { main_module, files[] } を含み、Provisioner が manifest を fetch
+# したあと files の各エントリを fetch して multi-module で Cloudflare Workers に
+# アップロードする (cloudflare.ts:deployWorker / index.ts:fetchWorkerBundle 参照)
+WORKER_BUNDLE_URL = "https://lh-bundles.pages.dev/manifest.json"
+# L-harness D1 スキーマ (packages/db/schema.sql) も同じ hosting にアップ済み
+SCHEMA_SQL_URL = "https://lh-bundles.pages.dev/schema.sql"
 
 # ─── シークレット（wrangler secret put で設定）────────────────
 # CLOUDFLARE_API_TOKEN  — D1 作成 + Worker デプロイ権限を持つ API トークン
