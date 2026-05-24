@@ -15,3 +15,6 @@ apps/web/out/
 apps/worker/dist/
 .worktrees/
 .claude/worktrees/
+
+# Phase C: Cloudflare Pages にデプロイする temp hosting dir
+.cf-bundles-hosting/

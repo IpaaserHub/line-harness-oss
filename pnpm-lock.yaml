@@ -58,6 +58,22 @@ importers:
         specifier: ^6.0.0
         version: 6.4.1(@types/node@25.5.0)(jiti@2.6.1)(lightningcss@1.32.0)
 
+  apps/provisioner:
+    dependencies:
+      hono:
+        specifier: ^4.6.0
+        version: 4.12.8
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^4.20241205.0
+        version: 4.20260317.1
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      wrangler:
+        specifier: ^4.0.0
+        version: 4.77.0(@cloudflare/workers-types@4.20260317.1)
+
   apps/web:
     dependencies:
       '@dnd-kit/core':
