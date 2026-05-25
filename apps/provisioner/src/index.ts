@@ -13,7 +13,13 @@
  */
 import { Hono } from 'hono';
 import type { Context, Next } from 'hono';
-import { CloudflareClient, CloudflareError, type ModuleFile, type WorkerBinding } from './cloudflare.js';
+import {
+  type AssetFile,
+  CloudflareClient,
+  CloudflareError,
+  type ModuleFile,
+  type WorkerBinding,
+} from './cloudflare.js';
 
 interface Env {
   CLOUDFLARE_ACCOUNT_ID: string;
@@ -97,16 +103,30 @@ app.post('/provision', async (c) => {
     const schemaSql = await fetchText(c.env.SCHEMA_SQL_URL, 'schema.sql');
     await cf.queryD1(db.uuid, schemaSql);
 
-    // 3. Deploy the L-harness Worker bound to this D1.
-    const { mainModule, files } = await fetchWorkerBundle(c.env.WORKER_BUNDLE_URL);
+    // 3. Fetch the L-harness Worker bundle (multi-module ESM) and optional
+    //    client assets (LIFF / admin UI static files served via ASSETS binding).
+    const { mainModule, files, clientAssetPaths } = await fetchWorkerBundle(c.env.WORKER_BUNDLE_URL);
+
+    // 4. If the bundle ships client assets, upload them first to get a JWT
+    //    that the worker deploy then references via metadata.assets.
+    let assetsCompletionJwt: string | undefined;
+    if (clientAssetPaths.length > 0) {
+      const baseUrl = c.env.WORKER_BUNDLE_URL.replace(/\/[^/]+$/, '');
+      const assets = await fetchClientAssets(`${baseUrl}/client`, clientAssetPaths);
+      assetsCompletionJwt = await cf.uploadAssets(name, assets);
+    }
+
+    // 5. Deploy the L-harness Worker bound to this D1 (+ ASSETS if any).
     const apiKey = generateApiKey();
     const bindings: WorkerBinding[] = [{ type: 'd1', name: 'DB', id: db.uuid }];
-    await cf.deployWorker(name, files, mainModule, bindings);
+    await cf.deployWorker(name, files, mainModule, bindings, {
+      assetsCompletionJwt,
+    });
 
-    // 4. Set the instance API key as a Worker secret.
+    // 6. Set the instance API key as a Worker secret.
     await cf.putWorkerSecret(name, 'API_KEY', apiKey);
 
-    // 5. Expose it on workers.dev.
+    // 7. Expose it on workers.dev.
     await cf.enableWorkersDev(name);
 
     return c.json({ success: true, data: { workerUrl, apiKey, alreadyProvisioned: false } }, 201);
@@ -164,23 +184,32 @@ async function fetchText(url: string, label: string): Promise<string> {
  * Fetch a Vite-built Worker bundle from a manifest URL.
  *
  * Manifest format (JSON):
- *   { "main_module": "index.js", "files": ["index.js", "assets/worker-entry-XXX.js", ...] }
+ *   {
+ *     "main_module": "index.js",
+ *     "files": ["index.js", "assets/worker-entry-XXX.js", ...],
+ *     "client_assets": ["/index.html", "/assets/main-XXX.css", ...]  // optional
+ *   }
  *
- * All `files` are resolved relative to the manifest URL's directory. Returns
- * the resolved modules ready to pass to `cf.deployWorker(scriptName, files, mainModule, bindings)`.
+ * Module `files` are resolved relative to the manifest URL's directory.
+ * `client_assets` (URL paths with leading slash) are NOT fetched here — they
+ * point into a `client/` sibling directory and are fetched separately via
+ * `fetchClientAssets` when ASSETS upload is needed.
  */
 async function fetchWorkerBundle(
   manifestUrl: string,
-): Promise<{ mainModule: string; files: ModuleFile[] }> {
+): Promise<{ mainModule: string; files: ModuleFile[]; clientAssetPaths: string[] }> {
   const manifestRes = await fetch(manifestUrl);
   if (!manifestRes.ok) {
     throw new Error(`failed to fetch manifest from ${manifestUrl}: ${manifestRes.status}`);
   }
-  const manifest = (await manifestRes.json()) as { main_module?: string; files?: string[] };
+  const manifest = (await manifestRes.json()) as {
+    main_module?: string;
+    files?: string[];
+    client_assets?: string[];
+  };
   if (!manifest.main_module || !Array.isArray(manifest.files) || manifest.files.length === 0) {
     throw new Error(`invalid manifest from ${manifestUrl}: missing main_module or files`);
   }
-  // Strip the manifest filename to get the base URL for resolving relative paths.
   const baseUrl = manifestUrl.replace(/\/[^/]+$/, '');
   const files = await Promise.all(
     manifest.files.map(async (path) => {
@@ -192,7 +221,33 @@ async function fetchWorkerBundle(
       return { path, content: await res.text() };
     }),
   );
-  return { mainModule: manifest.main_module, files };
+  return {
+    mainModule: manifest.main_module,
+    files,
+    clientAssetPaths: Array.isArray(manifest.client_assets) ? manifest.client_assets : [],
+  };
+}
+
+/**
+ * Fetch the static-asset files (HTML/CSS/JS/etc.) from the hosting and return
+ * them as `AssetFile[]` ready for `cf.uploadAssets()`.
+ *
+ * `baseUrl` is the host directory (e.g. `https://lh-bundles.pages.dev/client`).
+ * `paths` are URL paths (with leading slash) as they appear in the manifest's
+ * `client_assets`; the same paths are passed straight to Cloudflare as ASSETS
+ * routes.
+ */
+async function fetchClientAssets(baseUrl: string, paths: string[]): Promise<AssetFile[]> {
+  return Promise.all(
+    paths.map(async (path) => {
+      const fileUrl = `${baseUrl}${path}`;
+      const res = await fetch(fileUrl);
+      if (!res.ok) {
+        throw new Error(`failed to fetch client asset ${path} from ${fileUrl}: ${res.status}`);
+      }
+      return { path, content: await res.arrayBuffer() };
+    }),
+  );
 }
 
 function describe(err: unknown): string {
