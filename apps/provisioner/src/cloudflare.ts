@@ -104,26 +104,31 @@ export class CloudflareClient {
    * (e.g. `import './assets/worker-entry-XXX.js'`) so module-split bundles
    * work directly without re-bundling into a single file.
    *
-   * NOTE: the L-harness Worker can also serve static assets (the LIFF client)
-   * via an ASSETS binding. Assets require Cloudflare's separate asset-upload
-   * session flow (POST .../workers/scripts/{name}/assets-upload-session) and
-   * are intentionally out of this Phase C scaffold — see
-   * docs/plans/2026-05-21-tkdir-ytdir-line-integration-design.md §8. The
-   * spawned Worker functions without ASSETS as long as callers only hit
-   * defined API routes (the iframe at apps/web only calls /api/*).
+   * Pass `assetsCompletionJwt` (from `uploadAssets()`) to attach static assets
+   * served via the ASSETS binding. When present, the metadata gets an
+   * `assets.jwt` field and an `assets` binding is appended to `bindings`.
    */
   async deployWorker(
     scriptName: string,
     modules: ModuleFile[],
     mainModule: string,
     bindings: WorkerBinding[],
-    compatibilityDate = '2024-12-01',
+    options: DeployWorkerOptions = {},
   ): Promise<void> {
-    const metadata = {
+    const compatibilityDate = options.compatibilityDate ?? '2024-12-01';
+    const metadata: Record<string, unknown> = {
       main_module: mainModule,
       compatibility_date: compatibilityDate,
-      bindings,
+      bindings: options.assetsCompletionJwt
+        ? [...bindings, { type: 'assets', name: options.assetsBindingName ?? 'ASSETS' }]
+        : bindings,
     };
+    if (options.assetsCompletionJwt) {
+      metadata.assets = {
+        jwt: options.assetsCompletionJwt,
+        config: { run_worker_first: options.assetsRunWorkerFirst ?? true },
+      };
+    }
     const form = new FormData();
     form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
     for (const mod of modules) {
@@ -134,6 +139,92 @@ export class CloudflareClient {
       );
     }
     await this.request('PUT', `/accounts/${this.accountId}/workers/scripts/${scriptName}`, form);
+  }
+
+  /**
+   * Uploads static assets for the ASSETS binding, returning a completion JWT
+   * that must be passed into the subsequent `deployWorker()` call as
+   * `options.assetsCompletionJwt`.
+   *
+   * Implements Cloudflare's three-step assets-upload-session flow:
+   *   1. POST `.../assets-upload-session` with a manifest of
+   *      `{ "<path>": { hash, size } }` for every file we want served.
+   *      Response includes a session JWT and an array of "buckets" — groups of
+   *      file hashes that the server doesn't yet have cached.
+   *   2. For each non-empty bucket, POST `.../workers/assets/upload?base64=true`
+   *      with the session JWT and a multipart body whose field names are the
+   *      file hashes, values are the base64-encoded contents. Each call returns
+   *      a fresh JWT — the last one is the completion token.
+   *   3. Caller passes the final JWT into `deployWorker()`'s `assets.jwt`.
+   *
+   * Hash format is the first 16 bytes of sha256, lowercase hex (32 chars).
+   * Assets API ref: https://developers.cloudflare.com/api/operations/worker-script-upload-assets-1
+   */
+  async uploadAssets(scriptName: string, assets: AssetFile[]): Promise<string> {
+    // Pre-compute manifest (hash + size for each asset)
+    const manifestEntries: Array<{ path: string; hash: string; size: number; content: ArrayBuffer }> = [];
+    for (const asset of assets) {
+      const hash = await sha256TruncatedHex(asset.content);
+      manifestEntries.push({ path: asset.path, hash, size: asset.content.byteLength, content: asset.content });
+    }
+    const manifest: Record<string, { hash: string; size: number }> = {};
+    for (const e of manifestEntries) {
+      manifest[e.path] = { hash: e.hash, size: e.size };
+    }
+
+    // Step 1: start upload session
+    const sessionRes = await this.request<{ jwt: string; buckets?: string[][] }>(
+      'POST',
+      `/accounts/${this.accountId}/workers/scripts/${scriptName}/assets-upload-session`,
+      { manifest },
+    );
+    let completionJwt = sessionRes.jwt;
+    const buckets = sessionRes.buckets ?? [];
+
+    // Step 2: upload buckets (parallel within bucket, sequential between buckets so
+    // each new JWT chains forward). Each upload uses the LATEST JWT (the session
+    // JWT for the first bucket, then the JWT returned by each previous upload).
+    const hashToEntry = new Map<string, (typeof manifestEntries)[number]>();
+    for (const e of manifestEntries) hashToEntry.set(e.hash, e);
+
+    for (const bucket of buckets) {
+      if (bucket.length === 0) continue;
+      const form = new FormData();
+      for (const hash of bucket) {
+        const entry = hashToEntry.get(hash);
+        if (!entry) continue; // hash not in our manifest — shouldn't happen
+        const base64 = arrayBufferToBase64(entry.content);
+        form.append(
+          hash,
+          new Blob([base64], { type: contentTypeForPath(entry.path) }),
+          hash,
+        );
+      }
+      // The assets upload endpoint authenticates with the session JWT (not the
+      // account API token), so we bypass `this.request` and call fetch directly.
+      const uploadRes = await fetch(
+        `${API_BASE}/accounts/${this.accountId}/workers/assets/upload?base64=true`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${completionJwt}` },
+          body: form,
+        },
+      );
+      const uploadJson = (await uploadRes.json()) as CfEnvelope<{ jwt?: string }>;
+      if (!uploadRes.ok || !uploadJson.success) {
+        const msg = uploadJson.errors?.map((e) => `[${e.code}] ${e.message}`).join('; ') || uploadRes.statusText;
+        throw new CloudflareError(
+          `Cloudflare API POST /workers/assets/upload failed: ${msg}`,
+          uploadRes.status,
+          uploadJson.errors,
+        );
+      }
+      if (uploadJson.result?.jwt) {
+        completionJwt = uploadJson.result.jwt;
+      }
+    }
+
+    return completionJwt;
   }
 
   /** Sets a secret on a Worker script. */
@@ -160,7 +251,8 @@ export class CloudflareClient {
 export type WorkerBinding =
   | { type: 'd1'; name: string; id: string }
   | { type: 'r2_bucket'; name: string; bucket_name: string }
-  | { type: 'plain_text'; name: string; text: string };
+  | { type: 'plain_text'; name: string; text: string }
+  | { type: 'assets'; name: string };
 
 /** A single ES module file in a multi-module Worker upload. */
 export type ModuleFile = {
@@ -169,3 +261,64 @@ export type ModuleFile = {
   /** UTF-8 source of the module. */
   content: string;
 };
+
+/** A single static asset file for ASSETS-binding upload. */
+export type AssetFile = {
+  /** URL path the asset is served at (with leading slash, e.g. `/index.html`). */
+  path: string;
+  /** Raw file content. */
+  content: ArrayBuffer;
+};
+
+export type DeployWorkerOptions = {
+  compatibilityDate?: string;
+  /** Completion JWT from `uploadAssets()`. When set, an ASSETS binding is appended. */
+  assetsCompletionJwt?: string;
+  /** Binding name for ASSETS (defaults to `"ASSETS"`). */
+  assetsBindingName?: string;
+  /**
+   * Whether the Worker handles requests before ASSETS does. The L-harness
+   * Worker relies on this (e.g. bot UA → OGP HTML injection) — see
+   * apps/worker/wrangler.toml `run_worker_first`. Defaults to true.
+   */
+  assetsRunWorkerFirst?: boolean;
+};
+
+/** sha256(content) → first 16 bytes as lowercase hex (32 chars). */
+async function sha256TruncatedHex(content: ArrayBuffer): Promise<string> {
+  const hashBuffer = await crypto.subtle.digest('SHA-256', content);
+  const bytes = new Uint8Array(hashBuffer).subarray(0, 16);
+  let hex = '';
+  for (const b of bytes) hex += b.toString(16).padStart(2, '0');
+  return hex;
+}
+
+/** ArrayBuffer → base64 (latin1-safe). */
+function arrayBufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  // Chunk to keep String.fromCharCode argument count manageable for large files.
+  const chunk = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+/** Guess Content-Type from file extension for ASSETS upload metadata. */
+function contentTypeForPath(path: string): string {
+  const lower = path.toLowerCase();
+  if (lower.endsWith('.html')) return 'text/html;charset=utf-8';
+  if (lower.endsWith('.css')) return 'text/css;charset=utf-8';
+  if (lower.endsWith('.js') || lower.endsWith('.mjs')) return 'text/javascript;charset=utf-8';
+  if (lower.endsWith('.json')) return 'application/json;charset=utf-8';
+  if (lower.endsWith('.svg')) return 'image/svg+xml';
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.ico')) return 'image/x-icon';
+  if (lower.endsWith('.woff2')) return 'font/woff2';
+  if (lower.endsWith('.woff')) return 'font/woff';
+  return 'application/octet-stream';
+}
