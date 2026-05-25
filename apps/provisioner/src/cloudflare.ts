@@ -243,6 +243,22 @@ export class CloudflareClient {
     });
   }
 
+  /**
+   * Sets cron triggers (scheduled invocations) on a Worker script. Replaces
+   * any existing triggers — pass the full desired list each call. Apply
+   * AFTER `deployWorker` so the script exists.
+   *
+   * Cloudflare cron syntax: standard 5-field cron with quirks (no seconds,
+   * UTC). Each entry runs the worker's exported `scheduled()` handler.
+   */
+  async putCronTriggers(scriptName: string, crons: string[]): Promise<void> {
+    await this.request(
+      'PUT',
+      `/accounts/${this.accountId}/workers/scripts/${scriptName}/schedules`,
+      crons.map((cron) => ({ cron })),
+    );
+  }
+
   async deleteWorker(scriptName: string): Promise<void> {
     await this.request('DELETE', `/accounts/${this.accountId}/workers/scripts/${scriptName}`);
   }

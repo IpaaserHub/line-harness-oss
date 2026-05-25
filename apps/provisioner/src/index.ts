@@ -116,9 +116,14 @@ app.post('/provision', async (c) => {
       assetsCompletionJwt = await cf.uploadAssets(name, assets);
     }
 
-    // 5. Deploy the L-harness Worker bound to this D1 (+ ASSETS if any).
+    // 5. Deploy the L-harness Worker bound to this D1 + ASSETS + R2 IMAGES.
+    //    `line-harness-images` is a single shared R2 bucket; per-tenant
+    //    isolation comes from the in-Worker code namespacing image keys.
     const apiKey = generateApiKey();
-    const bindings: WorkerBinding[] = [{ type: 'd1', name: 'DB', id: db.uuid }];
+    const bindings: WorkerBinding[] = [
+      { type: 'd1', name: 'DB', id: db.uuid },
+      { type: 'r2_bucket', name: 'IMAGES', bucket_name: 'line-harness-images' },
+    ];
     await cf.deployWorker(name, files, mainModule, bindings, {
       assetsCompletionJwt,
     });
@@ -126,7 +131,12 @@ app.post('/provision', async (c) => {
     // 6. Set the instance API key as a Worker secret.
     await cf.putWorkerSecret(name, 'API_KEY', apiKey);
 
-    // 7. Expose it on workers.dev.
+    // 7. Set cron triggers (scheduled broadcasts / cleanup). Same cadence as
+    //    apps/worker/wrangler.toml [triggers]. Cron MUST be set after the
+    //    script exists, hence after deployWorker.
+    await cf.putCronTriggers(name, ['*/5 * * * *', '0 */6 * * *']);
+
+    // 8. Expose it on workers.dev.
     await cf.enableWorkersDev(name);
 
     return c.json({ success: true, data: { workerUrl, apiKey, alreadyProvisioned: false } }, 201);
