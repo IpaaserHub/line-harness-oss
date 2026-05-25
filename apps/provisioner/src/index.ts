@@ -28,6 +28,27 @@ interface Env {
   WORKERS_SUBDOMAIN: string;
   WORKER_BUNDLE_URL: string;
   SCHEMA_SQL_URL: string;
+  /**
+   * Opt-in to ASSETS-binding upload. Defaults OFF (`!== "true"`) because the
+   * upload step (sha256 + base64 of all client files) on the Workers FREE
+   * plan blows past the 10ms CPU limit and silently hangs the caller's
+   * fetch — TKDir/YTDir then see "ぐるぐる" indefinitely.
+   *
+   * When OFF, spawned Workers ship without ASSETS binding. The TKDir/YTDir
+   * iframe → apps/web (lh-admin-ui.pages.dev) → /api/* flow still works
+   * because apps/web is hosted on Cloudflare Pages independently — the
+   * spawned Worker only needs to serve API routes (Hono-handled).
+   *
+   * Set to `"true"` once Provisioner runs on Workers PAID ($5/mo unlocks
+   * 30s CPU and per-worker assets budgets).
+   */
+  ASSETS_UPLOAD_ENABLED?: string;
+  /**
+   * Opt-in to R2 IMAGES binding. Defaults OFF until we confirm the bucket
+   * `line-harness-images` exists and is readable from spawned Workers
+   * across the account. Set to `"true"` to attach the binding.
+   */
+  R2_IMAGES_ENABLED?: string;
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -107,23 +128,27 @@ app.post('/provision', async (c) => {
     //    client assets (LIFF / admin UI static files served via ASSETS binding).
     const { mainModule, files, clientAssetPaths } = await fetchWorkerBundle(c.env.WORKER_BUNDLE_URL);
 
-    // 4. If the bundle ships client assets, upload them first to get a JWT
-    //    that the worker deploy then references via metadata.assets.
+    // 4. If ASSETS_UPLOAD_ENABLED is set AND the bundle ships client assets,
+    //    upload them first to get a JWT that the worker deploy then
+    //    references via metadata.assets. Default OFF — see Env type doc.
     let assetsCompletionJwt: string | undefined;
-    if (clientAssetPaths.length > 0) {
+    const assetsEnabled = c.env.ASSETS_UPLOAD_ENABLED === 'true';
+    if (assetsEnabled && clientAssetPaths.length > 0) {
       const baseUrl = c.env.WORKER_BUNDLE_URL.replace(/\/[^/]+$/, '');
       const assets = await fetchClientAssets(`${baseUrl}/client`, clientAssetPaths);
       assetsCompletionJwt = await cf.uploadAssets(name, assets);
     }
 
-    // 5. Deploy the L-harness Worker bound to this D1 + ASSETS + R2 IMAGES.
-    //    `line-harness-images` is a single shared R2 bucket; per-tenant
-    //    isolation comes from the in-Worker code namespacing image keys.
+    // 5. Deploy the L-harness Worker bound to this D1 (+ optional R2 + ASSETS).
     const apiKey = generateApiKey();
-    const bindings: WorkerBinding[] = [
-      { type: 'd1', name: 'DB', id: db.uuid },
-      { type: 'r2_bucket', name: 'IMAGES', bucket_name: 'line-harness-images' },
-    ];
+    const bindings: WorkerBinding[] = [{ type: 'd1', name: 'DB', id: db.uuid }];
+    if (c.env.R2_IMAGES_ENABLED === 'true') {
+      bindings.push({
+        type: 'r2_bucket',
+        name: 'IMAGES',
+        bucket_name: 'line-harness-images',
+      });
+    }
     await cf.deployWorker(name, files, mainModule, bindings, {
       assetsCompletionJwt,
     });
