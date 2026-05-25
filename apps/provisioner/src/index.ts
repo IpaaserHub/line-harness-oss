@@ -131,10 +131,12 @@ app.post('/provision', async (c) => {
     // 6. Set the instance API key as a Worker secret.
     await cf.putWorkerSecret(name, 'API_KEY', apiKey);
 
-    // 7. Set cron triggers (scheduled broadcasts / cleanup). Same cadence as
-    //    apps/worker/wrangler.toml [triggers]. Cron MUST be set after the
-    //    script exists, hence after deployWorker.
-    await cf.putCronTriggers(name, ['*/5 * * * *', '0 */6 * * *']);
+    // 7. Cron triggers are intentionally SKIPPED to avoid the Cloudflare
+    //    account-wide limit (Workers Free plan = 5 cron triggers total).
+    //    With multiple spawned instances each setting 2 crons, the limit hits
+    //    immediately. Re-enable by uncommenting the call below after the
+    //    account is upgraded to Workers Paid (unlocks per-worker cron limits).
+    // await cf.putCronTriggers(name, ['*/5 * * * *', '0 */6 * * *']);
 
     // 8. Expose it on workers.dev.
     await cf.enableWorkersDev(name);
